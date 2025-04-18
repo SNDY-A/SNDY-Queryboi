@@ -1,0 +1,154 @@
+import streamlit as st
+from modules.nlp_processor import NLPProcessor
+from modules.db_connector import DatabaseConnector
+from modules.query_validator import QueryValidator
+from modules.animation_manager import AnimationManager
+import json
+import os
+
+# Initialize session state
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'current_db' not in st.session_state:
+    st.session_state.current_db = None
+if 'query_results' not in st.session_state:
+    st.session_state.query_results = None
+
+nlp_processor = NLPProcessor()
+query_validator = QueryValidator()
+animation_manager = AnimationManager()
+
+st.title("SQL Buddy - Natural Language SQL Assistant")
+st.markdown("Talk to your database in plain English! I'll handle the SQL for you.")
+
+# Database connection section
+with st.sidebar:
+    st.header("Database Connection")
+    db_type = st.selectbox("Database Type", ["SQLite", "MySQL", "PostgreSQL"])
+    
+    if db_type == "SQLite":
+        db_path = st.text_input("Database Path", "example.db")
+        conn_string = f"sqlite:///{db_path}"
+    elif db_type == "MySQL":
+        host = st.text_input("Host", "localhost")
+        port = st.text_input("Port", "3306")
+        user = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        database = st.text_input("Database")
+        conn_string = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    elif db_type == "PostgreSQL":
+        host = st.text_input("Host", "localhost")
+        port = st.text_input("Port", "5432")
+        user = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        database = st.text_input("Database")
+        conn_string = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    
+    if st.button("Connect"):
+        try:
+            db_connector = DatabaseConnector(conn_string)
+            st.session_state.current_db = db_connector
+            st.success(f"Connected to {db_type} database!")
+            # Load animation for successful connection
+            animation_manager.play_animation("happy")
+        except Exception as e:
+            st.error(f"Connection failed: {e}")
+            # Load animation for failed connection
+            animation_manager.play_animation("sad")
+
+# Main chat interface
+st.header("Chat with SQL Buddy")
+
+# Display chat history
+for chat in st.session_state.chat_history:
+    if chat["role"] == "user":
+        st.markdown(f"**You**: {chat['message']}")
+    else:
+        st.markdown(f"**SQL Buddy**: {chat['message']}")
+        if chat.get("sql_query"):
+            with st.expander("View SQL Query"):
+                st.code(chat["sql_query"], language="sql")
+        if chat.get("results") is not None:
+            with st.expander("View Results"):
+                st.dataframe(chat["results"])
+
+user_input = st.text_input("Type your request here (e.g., 'Show me all users who joined last month')")
+
+if user_input and st.session_state.current_db:
+    # Add user message to chat history
+    st.session_state.chat_history.append({"role": "user", "message": user_input})
+    
+    try:
+        # Parse natural language to SQL
+        sql_query = nlp_processor.text_to_sql(user_input)
+        
+        # Validate SQL query for safety
+        is_safe, risk_level, warning = query_validator.validate_query(sql_query)
+        
+        if not is_safe:
+            # Show warning animation
+            animation_manager.play_animation("warning")
+            
+            # Add assistant warning message
+            warning_message = f"⚠️ This query might be risky ({risk_level}): {warning}"
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "message": warning_message,
+                "sql_query": sql_query
+            })
+            
+            # confirmation to prevent data loss, Not letting another Intern mess with the datasets
+            if risk_level == "HIGH":
+                if st.button("I understand the risks, execute anyway"):
+                    results = st.session_state.current_db.execute_query(sql_query)
+                    # Add success message
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "message": "Query executed successfully!",
+                        "sql_query": sql_query,
+                        "results": results
+                    })
+            else:
+                # For medium/low risk, show confirm button
+                if st.button("Confirm execution"):
+                    results = st.session_state.current_db.execute_query(sql_query)
+                    # Add success message
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "message": "Query executed successfully!",
+                        "sql_query": sql_query,
+                        "results": results
+                    })
+        else:
+            # Execute safe query
+            results = st.session_state.current_db.execute_query(sql_query)
+            
+            # Show success animation
+            animation_manager.play_animation("success")
+            
+            # Generate a natural language response
+            response = nlp_processor.generate_response(user_input, sql_query, results)
+            
+            # Add assistant response to chat history
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "message": response,
+                "sql_query": sql_query,
+                "results": results
+            })
+            
+    except Exception as e:
+        # Show error animation
+        animation_manager.play_animation("error")
+        
+        # Add error message to chat history
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "message": f"Error: {str(e)}. Could you try rephrasing your request?"
+        })
+    
+    st.experimental_rerun()
+
+elif user_input:
+    st.warning("Please connect to a database first!")
+    animation_manager.play_animation("pointing")
