@@ -1,0 +1,372 @@
+import spacy
+import re
+import pandas as pd
+from typing import Dict, List, Any, Union
+
+class NLPProcessor:
+    def __init__(self):
+        """Initialize the NLP processor with language models and patterns."""
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except:
+            # download it
+            import subprocess
+            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+            self.nlp = spacy.load("en_core_web_sm")
+        
+        # action keywords mapping to SQL operations
+        self.action_keywords = {
+            "show": "SELECT",
+            "get": "SELECT",
+            "find": "SELECT",
+            "display": "SELECT",
+            "list": "SELECT",
+            "give": "SELECT",
+            "select": "SELECT",
+            
+            "create": "CREATE",
+            "make": "CREATE",
+            "build": "CREATE",
+            "establish": "CREATE",
+            
+            "insert": "INSERT",
+            "add": "INSERT",
+            "put": "INSERT",
+            
+            "update": "UPDATE",
+            "change": "UPDATE",
+            "modify": "UPDATE",
+            "set": "UPDATE",
+            
+            "delete": "DELETE",
+            "remove": "DELETE",
+            "drop": "DROP",
+            "destroy": "DROP",
+            
+            "join": "JOIN",
+            "connect": "JOIN",
+            "combine": "JOIN",
+            
+            "filter": "WHERE",
+            "where": "WHERE",
+            "when": "WHERE"
+        }
+        
+        # Common patterns for table operations
+        self.table_patterns = [
+            r"(?:from|in) (?:the )?(?:table )?([a-zA-Z0-9_]+)",
+            r"(?:table|tables) (?:named |called )?([a-zA-Z0-9_]+)",
+            r"([a-zA-Z0-9_]+) (?:table|data)"
+        ]
+        
+        # Column patterns
+        self.column_patterns = [
+            r"(?:columns?|fields?) (?:named |called |labeled |include |including )?([a-zA-Z0-9_, ]+)",
+            r"([a-zA-Z0-9_]+) (?:column|field)"
+        ]
+        
+        # Condition patterns for WHERE clauses
+        self.condition_patterns = [
+            r"where ([a-zA-Z0-9_]+) (?:is|equals|=|==) ([\"']?[\w\d\s]+[\"']?)",
+            r"with ([a-zA-Z0-9_]+) (?:as|being|set to) ([\"']?[\w\d\s]+[\"']?)",
+            r"(?:where|when|that have) ([a-zA-Z0-9_]+) (?:greater than|more than|>) ([\"']?[\w\d\s]+[\"']?)",
+            r"(?:where|when|that have) ([a-zA-Z0-9_]+) (?:less than|<) ([\"']?[\w\d\s]+[\"']?)",
+            r"(?:where|when|having) ([a-zA-Z0-9_]+) (?:contains|like|similar to) ([\"']?[\w\d\s%]+[\"']?)"
+        ]
+    
+    def text_to_sql(self, text: str) -> str:
+        """Convert natural language text to SQL query."""
+        # Preprocess text
+        text = text.lower().strip()
+        doc = self.nlp(text)
+        
+        # Identify the main SQL action
+        sql_action = self._identify_action(text)
+        
+        # Build appropriate SQL query based on identified action
+        if sql_action == "SELECT":
+            return self._build_select_query(text)
+        elif sql_action == "CREATE":
+            return self._build_create_query(text)
+        elif sql_action == "INSERT":
+            return self._build_insert_query(text)
+        elif sql_action == "UPDATE":
+            return self._build_update_query(text)
+        elif sql_action == "DELETE":
+            return self._build_delete_query(text)
+        elif sql_action == "DROP":
+            return self._build_drop_query(text)
+        else:
+            # Default to a simple SELECT * if action unclear
+            table_name = self._extract_table_name(text)
+            if table_name:
+                return f"SELECT * FROM {table_name} LIMIT 100;"
+            else:
+                raise ValueError("Could not determine what you want to do with the database.")
+    
+    def _identify_action(self, text: str) -> str:
+        """Identify the main SQL action from the text."""
+        words = text.split()
+        for word in words:
+            if word in self.action_keywords:
+                return self.action_keywords[word]
+        
+        # Default to SELECT if no action keyword found
+        return "SELECT"
+    
+    def _extract_table_name(self, text: str) -> str:
+        """Extract table name from the text using patterns."""
+        for pattern in self.table_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+    
+    def _extract_columns(self, text: str) -> List[str]:
+        """Extract column names from the text."""
+        for pattern in self.column_patterns:
+            match = re.search(pattern, text)
+            if match:
+                columns_text = match.group(1)
+                # Split by commas and clean up column names
+                columns = [col.strip() for col in columns_text.split(',')]
+                return columns
+        
+        # If no columns specified, default to all columns
+        return ["*"]
+    
+    def _extract_conditions(self, text: str) -> List[Dict[str, str]]:
+        """Extract conditions for WHERE clause."""
+        conditions = []
+        for pattern in self.condition_patterns:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                column = match.group(1)
+                value = match.group(2)
+                # Determine operator based on pattern
+                operator = "="
+                if "greater than" in pattern or "more than" in pattern or ">" in pattern:
+                    operator = ">"
+                elif "less than" in pattern or "<" in pattern:
+                    operator = "<"
+                elif "contains" in pattern or "like" in pattern or "similar" in pattern:
+                    operator = "LIKE"
+                    # Add wildcards if not present
+                    if "%" not in value:
+                        value = f"'%{value.strip('\'"')}%'"
+                
+                # Ensure string values are properly quoted
+                if operator != "LIKE" and not value.isnumeric() and not (value.startswith("'") and value.endswith("'")):
+                    value = f"'{value.strip('\'"')}'"
+                
+                conditions.append({
+                    "column": column,
+                    "operator": operator,
+                    "value": value
+                })
+        return conditions
+    
+    def _build_select_query(self, text: str) -> str:
+        """Build a SELECT query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine which table to query.")
+        
+        columns = self._extract_columns(text)
+        columns_str = ", ".join(columns)
+        
+        conditions = self._extract_conditions(text)
+        where_clause = ""
+        if conditions:
+            where_conditions = []
+            for condition in conditions:
+                where_conditions.append(f"{condition['column']} {condition['operator']} {condition['value']}")
+            where_clause = " WHERE " + " AND ".join(where_conditions)
+        
+        # Add limit to prevent large result sets
+        limit_clause = " LIMIT 100"
+        if "all" in text.lower():
+            limit_clause = ""
+        
+        return f"SELECT {columns_str} FROM {table_name}{where_clause}{limit_clause};"
+    
+    def _build_create_query(self, text: str) -> str:
+        """Build a CREATE TABLE query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine the name for the new table.")
+        
+        # Extract column definitions
+        columns = self._extract_columns(text)
+        
+        # Default column types if not specified
+        if columns == ["*"]:
+            raise ValueError("Please specify the columns for the new table.")
+        
+        # Try to identify data types for columns
+        column_defs = []
+        for col in columns:
+            data_type = "TEXT"  # Default type
+            
+            # Check for type hints in the text
+            if "integer" in text.lower() and col in text.lower():
+                data_type = "INTEGER"
+            elif "number" in text.lower() and col in text.lower():
+                data_type = "REAL"
+            elif "date" in text.lower() and col in text.lower():
+                data_type = "DATE"
+            
+            column_defs.append(f"{col} {data_type}")
+        
+        columns_str = ", ".join(column_defs)
+        return f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_str});"
+    
+    def _build_insert_query(self, text: str) -> str:
+        """Build an INSERT query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine which table to insert into.")
+        
+        # This is a simplified approach - in a real system you would need more sophisticated parsing
+        # to extract multiple column values correctly
+        values_pattern = r"values? (?:of |are |is |as )?([a-zA-Z0-9_, '\"]+)"
+        values_match = re.search(values_pattern, text)
+        
+        if not values_match:
+            raise ValueError("Could not determine values to insert. Please specify them clearly.")
+        
+        values_text = values_match.group(1)
+        # Split by commas and clean up values
+        values = [val.strip() for val in values_text.split(',')]
+        
+        # Try to extract columns as well
+        columns = self._extract_columns(text)
+        if columns == ["*"]:
+            columns = []  # Reset if default was used
+        
+        # Format the query
+        if columns and len(columns) == len(values):
+            columns_str = ", ".join(columns)
+            values_str = ", ".join([f"'{val}'" if not val.isnumeric() else val for val in values])
+            return f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+        else:
+            # Insert without specifying columns
+            values_str = ", ".join([f"'{val}'" if not val.isnumeric() else val for val in values])
+            return f"INSERT INTO {table_name} VALUES ({values_str});"
+    
+    def _build_update_query(self, text: str) -> str:
+        """Build an UPDATE query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine which table to update.")
+        
+        # Extract SET values - simplified approach
+        set_pattern = r"set ([a-zA-Z0-9_]+) (?:to|as|=|equals) ([\"']?[\w\d\s]+[\"']?)"
+        set_matches = re.finditer(set_pattern, text)
+        
+        set_clauses = []
+        for match in set_matches:
+            column = match.group(1)
+            value = match.group(2)
+            
+            # Ensure string values are properly quoted
+            if not value.isnumeric() and not (value.startswith("'") and value.endswith("'")):
+                value = f"'{value.strip('\'"')}'"
+                
+            set_clauses.append(f"{column} = {value}")
+        
+        if not set_clauses:
+            raise ValueError("Could not determine what values to update. Please specify column and value.")
+        
+        set_clause = ", ".join(set_clauses)
+        
+        # Extract conditions for WHERE clause
+        conditions = self._extract_conditions(text)
+        where_clause = ""
+        if conditions:
+            where_conditions = []
+            for condition in conditions:
+                where_conditions.append(f"{condition['column']} {condition['operator']} {condition['value']}")
+            where_clause = " WHERE " + " AND ".join(where_conditions)
+        
+        return f"UPDATE {table_name} SET {set_clause}{where_clause};"
+    
+    def _build_delete_query(self, text: str) -> str:
+        """Build a DELETE query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine which table to delete from.")
+        
+        # Extract conditions for WHERE clause
+        conditions = self._extract_conditions(text)
+        
+        # WARNING: Require explicit conditions for DELETE to prevent accidental deletion of all records
+        if not conditions and "all" not in text.lower():
+            raise ValueError("For safety, please specify conditions for DELETE operations or explicitly mention 'all'.")
+        
+        where_clause = ""
+        if conditions:
+            where_conditions = []
+            for condition in conditions:
+                where_conditions.append(f"{condition['column']} {condition['operator']} {condition['value']}")
+            where_clause = " WHERE " + " AND ".join(where_conditions)
+        
+        return f"DELETE FROM {table_name}{where_clause};"
+    
+    def _build_drop_query(self, text: str) -> str:
+        """Build a DROP TABLE query from natural language text."""
+        table_name = self._extract_table_name(text)
+        if not table_name:
+            raise ValueError("Could not determine which table to drop.")
+        
+        # For safety, check for confirmation keywords
+        if "permanently" in text.lower() or "completely" in text.lower():
+            return f"DROP TABLE {table_name};"
+        else:
+            # Safer option - warn through validation instead of refusing
+            return f"DROP TABLE {table_name};"
+    
+    def generate_response(self, user_input: str, sql_query: str, results: Union[pd.DataFrame, str, None]) -> str:
+        """Generate a natural language response based on the query and results."""
+        # Identify the main SQL action that was performed
+        action = sql_query.split()[0].upper()
+        
+        # Extract the table name from the SQL query
+        table_match = re.search(r"FROM\s+([a-zA-Z0-9_]+)", sql_query, re.IGNORECASE)
+        table_name = table_match.group(1) if table_match else "the table"
+        
+        # Generate appropriate responses
+        if action == "SELECT":
+            if isinstance(results, pd.DataFrame):
+                if results.empty:
+                    return f"I couldn't find any records in {table_name} matching your criteria."
+                else:
+                    row_count = len(results)
+                    col_count = len(results.columns)
+                    return f"Here are {row_count} records from {table_name} with {col_count} columns."
+            else:
+                return "The query was executed, but I couldn't retrieve the results."
+                
+        elif action == "INSERT":
+            return f"Successfully added new data to {table_name}."
+            
+        elif action == "UPDATE":
+            if isinstance(results, int):
+                return f"Successfully updated {results} records in {table_name}."
+            else:
+                return f"The data in {table_name} has been updated."
+                
+        elif action == "DELETE":
+            if isinstance(results, int):
+                return f"Successfully deleted {results} records from {table_name}."
+            else:
+                return f"The specified records have been deleted from {table_name}."
+                
+        elif action == "CREATE":
+            return f"Successfully created the new table {table_name}."
+            
+        elif action == "DROP":
+            return f"Successfully dropped the table {table_name}."
+            
+        else:
+            return "The operation was completed successfully."
